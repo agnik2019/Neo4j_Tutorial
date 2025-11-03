@@ -1,255 +1,439 @@
-# Neo4j Hands-on Guide
+## **What is the ATT&CK Knowledge Graph?**
 
-## 1) From Tables to Graphs: Fundamental Concepts
+The MITRE ATT&CK Knowledge Graph (AttackKG) represents the Adversarial Tactics, Techniques, and Common Knowledge (ATT&CK) framework as a connected graph.
 
-### Relational (tabular)
-- **Data units:** tables → rows → columns  
-- **Identity & joins:** PK/FK; join paths are fixed at design time  
-- **Query style:** `SELECT` with `JOIN`s (must name the join path)  
-- **Strengths:** well-structured facts, transactions/ledgers, reports, set math  
+In plain terms, it turns MITRE ATT&CK's structured cybersecurity data into nodes (entities) and relationships (edges) that can be explored and analyzed using Neo4j.
 
-### Graph (Labeled Property Graph, LPG)
-- **Data units:** nodes (with labels), relationships (with types & direction), both have properties  
-- **Identity & links:** first-class edges connect records directly; multi-hop queries are natural  
-- **Query style:** pattern matching with variable-length paths  
-- **Strengths:** highly connected data, exploratory questions, unknown/variable joins, path analytics  
+## **Structure of the Graph:** Each ATT&CK concept becomes a **node** in the graph with a type and properties. Each logical link (like _uses_, _mitigates_, or _in_tactic_) becomes a **relationship** between two nodes
 
-**Edges as first-class citizens**
-- Relationships can carry properties (`{since, confidence, weight}`), time, provenance, etc.  
-- Easy to model many-to-many and multi-hop structures without join tables.  
+| **ATT&CK Concept** | **STIX Type (stix_type)** | **Example Node Label** | **Typical Property Fields** |
+| --- | --- | --- | --- |
+| Intrusion Set (Group) | intrusion-set | :Attack | name, description, aliases |
+| --- | --- | --- | --- |
+| Technique | attack-pattern | :Attack | name, external_id, x_mitre_platforms |
+| --- | --- | --- | --- |
+| Sub-Technique | also attack-pattern (with dot IDs) | :Attack | name, external_id |
+| --- | --- | --- | --- |
+| Software (Tool or Malware) | tool, malware | :Attack | name, stix_type, description |
+| --- | --- | --- | --- |
+| Tactic | x-mitre-tactic | :Attack | name, x_mitre_shortname |
+| --- | --- | --- | --- |
+| Mitigation | course-of-action | :Attack | name, description |
+| --- | --- | --- | --- |
 
-**When to use which**
-- Relational: stable, highly structured OLTP (orders, inventory, accounting).  
-- Graph: when relationships dominate (identity resolution, knowledge bases, fraud, recommendations).  
+**Some Key Relationship Types :**
 
----
+| **Relationship** | **Meaning** | **Example** |
+| --- | --- | --- |
+| uses | A group or software uses a technique or another software | APT28 → uses → Credential Dumping |
+| --- | --- | --- |
+| mitigates | A mitigation prevents or reduces a technique | MFA → mitigates → Credential Dumping |
+| --- | --- | --- |
+| subtechnique-of | A sub-technique belongs to a parent technique | PowerShell (T1059.001) → subtechnique-of → Command Execution (T1059) |
+| --- | --- | --- |
 
-## 2) Schema & Ontology: Designing the Structure
+## **Level 1 - Easy (Query Warm-ups)**
 
-### Relational recap
-- ER diagrams, normalization (1NF/2NF/3NF), strong typing, PK/FK constraints.  
+### **1) List all labels and their counts (top 10)**
 
-### LPG schema elements
-- **Labels:** `(:Technique)`, `(:Group)`, `(:Tool)`  
-- **Relationship types:** `[:USES]`, `[:MITIGATES]`, `[:IN_TACTIC]`  
-- **Properties:** strings, numbers, booleans, arrays  
-- **Constraints & indexes:**  
-  ```cypher
-  CREATE CONSTRAINT attack_id IF NOT EXISTS
-  FOR (n:Attack) REQUIRE n.id IS UNIQUE;
-  ```
+MATCH (n)
 
-### RDF/OWL (ontology) at a glance
-- Triples: subject–predicate–object IRIs, classes & properties  
-- Ontologies standardize vocabulary  
-- Mapping to LPG: classes → labels, properties → rel types, triples → edges  
+UNWIND labels(n) AS label
 
-### Parallels (RDB → Graph)
-- Tables with PK → node labels with a unique key  
-- Join tables → relationships (with props)  
-- Foreign keys → relationship endpoints  
+RETURN label, count(\*) AS count
 
-### Design patterns
-- Star, snowflake/galaxy, tree, path  
-- Multi-label nodes: e.g., `(:Software:AssetComponent)`  
-- Bridge entity for hyperedges: e.g., `(:Transaction)`  
+ORDER BY count DESC
 
----
+LIMIT 10;
 
-## 3) Data Normalization & Modeling Principles
-- RDB normalization: reduce redundancy, ensure integrity.  
-- Graphs: identity = node, connection = edge.  
-- Selective denormalization for faster traversals.  
-- Use reification for property-rich relationships.  
-- Supernodes okay if intentional (e.g., `(:Country)`).  
-- Duplicate values if needed for frequent queries (with refresh job).  
+### **2) List all relationship types and their counts (top 10)**
 
----
+MATCH ()-\[r\]->()
 
-## 4) Ingesting Data & Transactions
+RETURN type(r) AS type, count(r) AS count
 
-### Neo4j ingestion patterns
-- **Idempotent writes:** use `MERGE` with `ON CREATE/ON MATCH`  
-- **Batching:** use `apoc.periodic.iterate`  
-- **Schema evolution:** `IF NOT EXISTS` constraints  
+ORDER BY count DESC
 
-**Examples:**
+LIMIT 10;
 
-```cypher
-// Load nodes
-LOAD CSV WITH HEADERS FROM 'file:///nodes.csv' AS row
-MERGE (n:Entity {id: row.id})
-SET n += apoc.map.clean(row, ['id'], []);
+### **3) STIX-type buckets under :Attack**
 
-// Load relationships
-LOAD CSV WITH HEADERS FROM 'file:///edges.csv' AS row
-MATCH (s:Entity {id: row.src}), (t:Entity {id: row.dst})
-MERGE (s)-[r:REL {id: row.edge_id}]->(t)
-SET r.type = row.type, r.weight = toFloat(row.weight);
-```
+MATCH (a:Attack)
 
-**Batch import:**
-```cypher
-CALL apoc.periodic.iterate(
-  'LOAD CSV WITH HEADERS FROM "file:///edges.csv" AS row RETURN row',
-  'MATCH (s:Entity {id: row.src}),(t:Entity {id: row.dst})
-   MERGE (s)-[:REL {id: row.edge_id}]->(t)',
-  {batchSize: 5000, parallel: false}
-);
-```
+RETURN a.stix_type AS stix_type, count(a) AS count
 
----
+ORDER BY count DESC;
 
-## 5) Query Languages: OpenCypher (LPG) vs SPARQL (RDF)
+### **4) Show 10 sample :Attack nodes**
 
-### SPARQL (RDF)
-```sparql
-SELECT ?tech WHERE {
-  ?tech a attack:Technique ;
-        attack:inTactic attack:DefenseEvasion .
+MATCH (a:Attack)
+
+RETURN a.name AS name, a.stix_type AS stix_type, a.id AS id
+
+LIMIT 10;
+
+### **5) 20 technique names alphabetically**
+
+MATCH (t:Attack {stix_type: 'attack-pattern'})
+
+RETURN t.name AS technique
+
+ORDER BY technique
+
+LIMIT 20;
+
+### **6) 20 intrusion-set (group) names alphabetically**
+
+MATCH (g:Attack {stix_type: 'intrusion-set'})
+
+RETURN g.name AS group
+
+ORDER BY group
+
+LIMIT 20;
+
+### **7) 20 software names (tool/malware)**
+
+MATCH (s:Attack)
+
+WHERE s.stix_type IN \['tool','malware'\]
+
+RETURN s.name AS software, s.stix_type AS kind
+
+ORDER BY software
+
+LIMIT 20;
+
+### **8) All ATT&CK tactics (x-mitre-tactic) shortnames**
+
+MATCH (t:Attack {stix_type: 'x-mitre-tactic'})
+
+RETURN DISTINCT t.name AS tactic, t.x_mitre_shortname AS shortname
+
+ORDER BY shortname;
+
+### **9) 20 mitigation names**
+
+MATCH (m:Attack {stix_type: 'course-of-action'})
+
+RETURN m.name AS mitigation
+
+ORDER BY mitigation
+
+LIMIT 20;
+
+### **10) Key ATT&CK links present (by ATTACK_REL.rel_type)**
+
+MATCH ()-\[r:ATTACK_REL\]->()
+
+RETURN r.rel_type AS relationship_type, count(r) AS count
+
+ORDER BY count DESC
+
+LIMIT 10;
+
+## **Level 2 - Multistep (Analytics & Joins)**
+
+### **1) Software overlap for a technique term (e.g., "malicious file")**
+
+WITH toLower('malicious file') AS term
+
+MATCH (t:Attack {stix_type:'attack-pattern'})
+
+WHERE toLower(t.name) CONTAINS term
+
+MATCH (g:Attack {stix_type:'intrusion-set'})-\[:ATTACK_REL {rel_type:'uses'}\]->(t)
+
+MATCH (g)-\[:ATTACK_REL {rel_type:'uses'}\]->(s:Attack)
+
+WHERE s.stix_type IN \['tool','malware'\]
+
+RETURN s.name AS software, s.stix_type AS kind,
+
+count(DISTINCT g) AS group_count,
+
+collect(DISTINCT g.name)\[0..5\] AS sample_groups
+
+ORDER BY group_count DESC, software;
+
+### **2) Top-3 techniques for a group by software implementations + mitigations (e.g., "APT28")**
+
+WITH 'APT28' AS groupName
+
+MATCH (g:Attack {stix_type:'intrusion-set', name:groupName})-\[:ATTACK_REL {rel_type:'uses'}\]->(s:Attack)
+
+WHERE s.stix_type IN \['tool','malware'\]
+
+MATCH (s)-\[:ATTACK_REL {rel_type:'uses'}\]->(tech:Attack {stix_type:'attack-pattern'})
+
+OPTIONAL MATCH (m:Attack {stix_type:'course-of-action'})-\[:ATTACK_REL {rel_type:'mitigates'}\]->(tech)
+
+RETURN tech.name AS technique,
+
+count(DISTINCT s) AS software_count,
+
+collect(DISTINCT m.name)\[0..5\] AS mitigations
+
+ORDER BY software_count DESC, technique
+
+LIMIT 3;
+
+**3) Most-used sub-techniques under the "execution" tactic and who uses them**
+
+// Level 2 - Q3: Most-used sub-techniques under the "execution" tactic and who uses them
+
+MATCH (ta:Attack {stix_type:'x-mitre-tactic'})
+
+WHERE toLower(ta.name) = 'execution' // match the Execution tactic safely
+
+MATCH (sub:Attack {stix_type:'attack-pattern'})-\[:IN_TACTIC\]->(ta)
+
+WHERE EXISTS {
+
+(sub)-\[:ATTACK_REL {rel_type:'subtechnique-of'}\]->(:Attack {stix_type:'attack-pattern'})
+
+} // keep only sub-techniques via explicit relation
+
+MATCH (g:Attack {stix_type:'intrusion-set'})-\[:ATTACK_REL {rel_type:'uses'}\]->(sub)
+
+RETURN sub.name AS sub_technique,
+
+count(DISTINCT g) AS group_count,
+
+collect(DISTINCT g.name)\[0..5\] AS top_groups
+
+ORDER BY group_count DESC, sub_technique
+
+LIMIT 10;
+
+### **4) Shared tactics between two software families (e.g., "rar" and "PsExec")**
+
+:param s1 => 'rar';
+
+:param s2 => 'psexec';
+
+:param k => 8;
+
+// Q4 - Shared tactics between two software families (CONTAINS match, schema-safe)
+
+WITH toLower(\$s1) AS a, toLower(\$s2) AS b
+
+// match all software whose names contain the terms (tool|malware)
+
+MATCH (s1:Attack)
+
+WHERE s1.stix_type IN \['tool','malware'\] AND toLower(s1.name) CONTAINS a
+
+WITH a, b, collect(DISTINCT s1) AS s1s
+
+MATCH (s2:Attack)
+
+WHERE s2.stix_type IN \['tool','malware'\] AND toLower(s2.name) CONTAINS b
+
+WITH s1s, collect(DISTINCT s2) AS s2s
+
+// expand pairs; go software -> techniques -> tactic (same tactic node)
+
+UNWIND s1s AS s1
+
+UNWIND s2s AS s2
+
+MATCH (s1)-\[:ATTACK_REL {rel_type:'uses'}\]->(t1:Attack {stix_type:'attack-pattern'})
+
+MATCH (s2)-\[:ATTACK_REL {rel_type:'uses'}\]->(t2:Attack {stix_type:'attack-pattern'})
+
+MATCH (t1)-\[:IN_TACTIC\]->(ta:Attack {stix_type:'x-mitre-tactic'})
+
+MATCH (t2)-\[:IN_TACTIC\]->(ta)
+
+// show shared tactic and example techniques from each software
+
+RETURN s1.name AS s1_name,
+
+s2.name AS s2_name,
+
+coalesce(ta.shortname, ta.name) AS shared_tactic,
+
+collect(DISTINCT t1.name)\[0..\$k\] AS s1_tech_examples,
+
+collect(DISTINCT t2.name)\[0..\$k\] AS s2_tech_examples
+
+ORDER BY s1_name, s2_name, shared_tactic;
+
+### **5) Unmitigated software risks**
+
+MATCH (s:Attack)
+
+WHERE s.stix_type IN \['tool','malware'\]
+
+MATCH (s)-\[:ATTACK_REL {rel_type:'uses'}\]->(tech:Attack {stix_type:'attack-pattern'})
+
+MATCH (g:Attack {stix_type:'intrusion-set'})-\[:ATTACK_REL {rel_type:'uses'}\]->(tech)
+
+WHERE NOT ( (:Attack {stix_type:'course-of-action'})-\[:ATTACK_REL {rel_type:'mitigates'}\]->(tech) )
+
+RETURN DISTINCT s.name AS software, tech.name AS technique, g.name AS example_group
+
+ORDER BY software, technique
+
+LIMIT 20;
+
+### **6) Technique → Tactic coverage for a given group (e.g., APT29)**
+
+// Q6 - technique → tactic coverage for a given group
+
+WITH 'APT29' AS group_name, 5 AS examples_per_tactic
+
+WITH toLower(group_name) AS gname, toInteger(examples_per_tactic) AS K
+
+MATCH (g:Attack {stix_type:'intrusion-set'})
+
+WHERE toLower(g.name) CONTAINS gname
+
+// group -> techniques
+
+MATCH (g)-\[:ATTACK_REL {rel_type:'uses'}\]->(t:Attack {stix_type:'attack-pattern'})
+
+// technique -> tactic
+
+MATCH (t)-\[:IN_TACTIC\]->(ta:Attack {stix_type:'x-mitre-tactic'})
+
+WITH ta.shortname AS tactic, collect(DISTINCT t.name) AS techs, K
+
+RETURN tactic,
+
+size(techs) AS techniques_count,
+
+techs\[0..K\] AS example_techniques
+
+ORDER BY techniques_count DESC, tactic;
+
+## **Level 3 - Graph-Algorithm Flavored**
+
+## **1) Centrality of techniques**
+
+/\* Rank techniques by distinct neighbors: (# groups using it) + (# software using it) \*/
+
+MATCH (tech:Attack {stix_type:'attack-pattern'})
+
+OPTIONAL MATCH (tech)<-\[:ATTACK_REL {rel_type:'uses'}\]-(g:Attack {stix_type:'intrusion-set'})
+
+WITH tech, collect(DISTINCT g.name) AS groups
+
+OPTIONAL MATCH (tech)<-\[:ATTACK_REL {rel_type:'uses'}\]-(s:Attack)
+
+WHERE s.stix_type IN \['tool','malware'\]
+
+WITH tech, groups, collect(DISTINCT s.name) AS software
+
+WITH tech, size(groups) + size(software) AS degree
+
+RETURN tech.name AS technique, degree
+
+ORDER BY degree DESC, technique
+
+LIMIT 20;
+
+### **2) Community-like "attack kits" via 2-hop uses ego-components**
+
+// Level 3 - Q2: Community-like "attack kits" via 'uses' only (4 hops), APOC-free, fixed limits
+
+MATCH (seed:Attack {stix_type:'intrusion-set'})
+
+WITH seed
+
+ORDER BY seed.name
+
+LIMIT 120
+
+CALL {
+
+WITH seed
+
+MATCH p = (seed)-\[:ATTACK_REL\*1..4\]-(m:Attack)
+
+WHERE m.stix_type IN \['intrusion-set','tool','malware','attack-pattern'\]
+
+AND ALL(r IN relationships(p) WHERE r.rel_type = 'uses')
+
+WITH seed, collect(DISTINCT m) AS ms // keep seed in scope for the next line
+
+RETURN ms + \[seed\] AS nodes // return only 'nodes'
+
 }
-```
 
-### OpenCypher (LPG)
-```cypher
-MATCH (tech:Attack {stix_type:'attack-pattern'})-[:IN_TACTIC]->(tac:Attack {stix_type:'x-mitre-tactic'})
-WHERE toLower(tac.shortname) = 'defense-evasion'
-RETURN tech.name;
-```
+UNWIND nodes AS n
 
-**Thinking shift:**  
-- SQL joins → explicit graph patterns  
-- Variable-length traversals → `[:KNOWS*1..2]`
+WITH nodes, min(elementId(n)) AS component_key
 
----
+UNWIND nodes AS n
 
-## 6) Advanced Analysis
+WITH component_key, collect(DISTINCT n) AS comp_nodes
 
-Examples:
-```cypher
-// Count techniques per group
-MATCH (g:Attack {stix_type:'intrusion-set'})-[:ATTACK_REL {rel_type:'uses'}]->(t:Attack {stix_type:'attack-pattern'})
-RETURN g.name, count(DISTINCT t) AS techniques
-ORDER BY techniques DESC LIMIT 20;
-```
+WITH component_key,
 
-Graph algorithms with GDS:
-```cypher
-CALL gds.graph.project('attackUses','Attack',{ATTACK_REL:{type:'ATTACK_REL'}});
-CALL gds.pageRank.stream('attackUses')
-YIELD nodeId, score
-RETURN gds.util.asNode(nodeId).name AS node, score
-ORDER BY score DESC LIMIT 20;
-```
+\[x IN comp_nodes WHERE x.stix_type = 'intrusion-set' | x.name\] AS groups,
 
----
+\[x IN comp_nodes WHERE x.stix_type IN \['tool','malware'\] | x.name\] AS software,
 
-## 7) Use Case Deep Dives
+\[x IN comp_nodes WHERE x.stix_type = 'attack-pattern' | x.name\] AS techniques
 
-- **7a) Attack Surface Modeling**: MITRE ATT&CK dataset (STIX 2.1)  
-- **7b) Customer 360 Views**: (Customer)-[:PLACED]->(Order)-[:CONTAINS]->(Product)  
-- **7c) Fraud Detection**: Transaction graphs with (Account)-[:TX]->(Account)  
+WITH component_key, groups, software, techniques,
 
-All include **warm-up queries, pivots, coverage gaps, shortest paths**.
+size(groups) AS n_groups,
 
----
+size(software) AS n_software,
 
-## Setup Instructions
+size(techniques) AS n_techniques
 
-1. **Create project folders**
-   ```bash
-   mkdir -p ~/neo4j-project/{import,plugins}
-   cd neo4j-project
-   mv ~/Downloads/triples.csv ./import/
-   ```
+RETURN component_key,
 
-2. **Docker compose file**
-   ```yaml
-   version: "3.9"
-   services:
-     neo4j:
-       image: neo4j:5.22.0
-       container_name: neo4j-container
-       ports:
-         - "7474:7474"
-         - "7687:7687"
-       environment:
-         NEO4J_AUTH: neo4j/YourStrongPass123!
-         NEO4J_PLUGINS: '["apoc"]'
-         NEO4J_apoc_import_file_enabled: "true"
-         NEO4J_server_directories_import: "/import"
-       volumes:
-         - neo4j_data:/data
-         - ./import:/import
-         - ./plugins:/plugins
-   volumes:
-     neo4j_data:
-   ```
+n_groups,
 
-3. **Start Neo4j**
-   ```bash
-   docker compose up -d
-   docker ps --filter name=neo4j-container
-   ```
+n_software,
 
-4. **Access UI**
-   - Browser: http://localhost:7474  
-   - User: `neo4j`  
-   - Pass: `YourStrongPass123!`
+n_techniques,
 
-5. **Create uniqueness constraint**
-   ```cypher
-   CREATE CONSTRAINT entity_name_unique IF NOT EXISTS
-   FOR (e:Entity) REQUIRE e.name IS UNIQUE;
-   ```
+(n_groups + n_software + n_techniques) AS size_total,
 
-6. **Load triples**
-   ```cypher
-   LOAD CSV WITH HEADERS FROM 'file:///triples.csv' AS row
-   WITH trim(row.head) AS h, trim(row.relation) AS r, trim(row.tail) AS t
-   WHERE h <> '' AND r <> '' AND t <> ''
-   MERGE (h:Entity {name: h})
-   MERGE (t:Entity {name: t})
-   WITH h, t, toUpper(replace(r,' ','_')) AS rtype
-   CALL apoc.create.relationship(h, rtype, {}, t) YIELD rel
-   RETURN count(rel) AS created;
-   ```
+groups\[0..10\] AS example_groups,
 
----
+software\[0..10\] AS example_software,
 
-## Dataset: MITRE ATT&CK
-- **Domains:** Enterprise, Mobile, ICS  
-- **Objects:** techniques, tactics, groups, malware, tools, mitigations, data components  
-- **Edges:** uses, mitigates, detects, subtechnique-of, in_tactic  
+techniques\[0..10\] AS example_techniques
 
----
+ORDER BY size_total DESC, n_groups DESC, n_software DESC, n_techniques DESC
 
-## Exercises
+LIMIT 25;
 
-### Part A — Warm-up
-- Count nodes, relationships, object types  
-- Which tactics have most techniques?  
-- Active vs deprecated  
+### **3) Link prediction (techniques a group might adopt next) - software-backed**
 
-### Part B — Threat-Intel Pivots
-- Techniques used by group  
-- Software a group uses  
-- Which groups use a technique  
+WITH 'APT1' AS groupName
 
-### Part C — Defense Coverage
-- Mitigations for techniques  
-- Coverage gaps (no mitigations)  
-- Detection coverage  
+/\* Known software for the group \*/
 
-### Part D — Structure & Taxonomy
-- Tactic ↔ techniques mapping  
-- Subtechniques hierarchy  
-- Platform/domain breakdown  
-- Recently modified techniques  
+MATCH (g:Attack {stix_type:'intrusion-set', name:groupName})-\[:ATTACK_REL {rel_type:'uses'}\]->(s:Attack)
 
-### Part E — Scenarios
-- Build mitigation backlog  
-- Choose detections for tactic  
-- Pivot via software  
+WHERE s.stix_type IN \['tool','malware'\]
 
----
+/\* Known techniques for the group \*/
+
+OPTIONAL MATCH (g)-\[:ATTACK_REL {rel_type:'uses'}\]->(known:Attack {stix_type:'attack-pattern'})
+
+WITH g, collect(DISTINCT known) AS knownTechs, collect(DISTINCT s) AS sw
+
+/\* Candidate techniques used by that software but not already known to the group \*/
+
+UNWIND sw AS s1
+
+MATCH (s1)-\[:ATTACK_REL {rel_type:'uses'}\]->(cand:Attack {stix_type:'attack-pattern'})
+
+WHERE NOT cand IN knownTechs
+
+WITH cand, count(DISTINCT s1) AS supporting_software
+
+ORDER BY supporting_software DESC, cand.name
+
+RETURN cand.name AS predicted_technique, supporting_software AS score
+
+LIMIT 15;
