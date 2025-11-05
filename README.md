@@ -32,6 +32,139 @@ In plain terms, it turns MITRE ATT&CK's structured cybersecurity data into nodes
 | subtechnique-of | A sub-technique belongs to a parent technique | PowerShell (T1059.001) → subtechnique-of → Command Execution (T1059) |
 | --- | --- | --- |
 
+# 🧠 MITRE ATT&CK STIX → Neo4j Import Script
+
+This guide provides a Cypher script to import MITRE ATT&CK data (Enterprise, Mobile, and ICS STIX bundles) into a Neo4j database.  
+It loads the STIX objects as nodes and relationships, applies constraints for consistency, and builds helper links to make common queries easier and faster.
+
+---
+
+## ⚙️ Prerequisites
+
+- **Neo4j 5.x+**
+- **APOC plugin** enabled
+- MITRE ATT&CK STIX bundles located in the Neo4j import directory:
+  - `enterprise-attack.json`
+  - `mobile-attack.json`
+  - `ics-attack.json`
+
+---
+Dataset: https://attack.mitre.org/, https://github.com/mitre-attack/attack-stix-data 
+
+## 0️⃣ Define STIX Bundle Locations
+
+Point to the three ATT&CK STIX bundles that reside in the Neo4j `import` folder.
+
+```cypher
+:param files => [
+  "file:///enterprise-attack/enterprise-attack.json",
+  "file:///mobile-attack/mobile-attack.json",
+  "file:///ics-attack/ics-attack.json"
+];
+```
+
+```cypher
+// ----------------------------------------------------------------------------
+// 1) Constraints (idempotent)
+// ----------------------------------------------------------------------------
+CREATE CONSTRAINT attack_id IF NOT EXISTS
+FOR (n:Attack) REQUIRE n.id IS UNIQUE;
+
+CREATE CONSTRAINT attack_rel_id IF NOT EXISTS
+FOR ()-[r:ATTACK_REL]-() REQUIRE r.id IS UNIQUE;
+
+// (Optional but handy for name lookups)
+CREATE INDEX attack_name IF NOT EXISTS FOR (n:Attack) ON (n.name);
+
+// ----------------------------------------------------------------------------
+// 2) Load ALL non-relationship STIX objects as :Attack nodes
+//    (techniques, sub-techniques, tactics, tools, malware, groups, mitigations, etc.)
+// ----------------------------------------------------------------------------
+CALL apoc.periodic.iterate(
+  "
+  UNWIND $files AS f
+  CALL apoc.load.json(f) YIELD value
+  UNWIND value.objects AS obj
+  WITH obj
+  WHERE obj.type <> 'relationship'
+  RETURN obj
+  ",
+  "
+  MERGE (a:Attack {id: obj.id})
+  SET a.stix_type  = obj.type,
+      a.name       = coalesce(obj.name, obj.x_mitre_shortname),
+      a.description= obj.description,
+      a.created    = CASE WHEN obj.created  IS NOT NULL THEN datetime(obj.created)  END,
+      a.modified   = CASE WHEN obj.modified IS NOT NULL THEN datetime(obj.modified) END,
+      a.revoked    = coalesce(obj.revoked, false),
+      a.deprecated = coalesce(obj.x_mitre_deprecated, false),
+      a.platforms  = coalesce(obj.x_mitre_platforms, []),
+      a.domains    = coalesce(obj.x_mitre_domains, []),
+      a.kc_phases  = [p IN coalesce(obj.kill_chain_phases, []) | p.phase_name],
+      a.shortname  = obj.x_mitre_shortname
+  ",
+  {params:{files:$files}, batchSize:1000, parallel:true}
+);
+
+// ----------------------------------------------------------------------------
+// 3) Load STIX relationship objects as :ATTACK_REL edges
+//    Keeps the STIX relationship_type in r.rel_type (uses, mitigates, detects, subtechnique-of, ...)
+// ----------------------------------------------------------------------------
+CALL apoc.periodic.iterate(
+  "
+  UNWIND $files AS f
+  CALL apoc.load.json(f) YIELD value
+  UNWIND value.objects AS obj
+  WITH obj
+  WHERE obj.type = 'relationship'
+  RETURN obj
+  ",
+  "
+  MATCH (s:Attack {id: obj.source_ref})
+  MATCH (t:Attack {id: obj.target_ref})
+  MERGE (s)-[r:ATTACK_REL {id: obj.id}]->(t)
+    SET r.rel_type    = obj.relationship_type,
+        r.description = obj.description
+  ",
+  {params:{files:$files}, batchSize:1000, parallel:true}
+);
+
+// ----------------------------------------------------------------------------
+// 4) Helper edges: Technique -> Tactic membership via kill_chain_phases
+//    (makes tactic queries easy/fast)
+// ----------------------------------------------------------------------------
+MATCH (tech:Attack {stix_type:'attack-pattern'})
+UNWIND coalesce(tech.kc_phases, []) AS phase
+MATCH (tac:Attack {stix_type:'x-mitre-tactic'})
+WHERE toLower(tac.shortname) = toLower(phase)
+MERGE (tech)-[:IN_TACTIC]->(tac);
+
+// ----------------------------------------------------------------------------
+// 5) Quick sanity checks
+// ----------------------------------------------------------------------------
+MATCH (n:Attack) RETURN count(n) AS nodes;
+MATCH ()-[r:ATTACK_REL]->() RETURN count(r) AS relationships;
+MATCH (:Attack {stix_type:'attack-pattern'})-[:IN_TACTIC]->(:Attack {stix_type:'x-mitre-tactic'})
+RETURN count(*) AS technique_tactic_links;
+```
+
+# MITRE ATT&CK Neo4j Import Script
+
+## 1️⃣ Create Constraints and Indexes (Idempotent)
+
+Ensure unique IDs for nodes and relationships and create indexes for faster lookups.
+
+```cypher
+CREATE CONSTRAINT attack_id IF NOT EXISTS
+FOR (n:Attack) REQUIRE n.id IS UNIQUE;
+
+CREATE CONSTRAINT attack_rel_id IF NOT EXISTS
+FOR ()-[r:ATTACK_REL]-() REQUIRE r.id IS UNIQUE;
+
+-- Optional but useful for lookup by name
+CREATE INDEX attack_name IF NOT EXISTS FOR (n:Attack) ON (n.name);
+```
+
 ## **Level 1 - Easy (Query Warm-ups)**
 
 ### **1) List all labels and their counts (top 10)**
