@@ -32,7 +32,7 @@ In plain terms, it turns MITRE ATT&CK's structured cybersecurity data into nodes
 | subtechnique-of | A sub-technique belongs to a parent technique | PowerShell (T1059.001) → subtechnique-of → Command Execution (T1059) |
 | --- | --- | --- |
 
-# 🧠 MITRE ATT&CK STIX → Neo4j Import Script
+# MITRE ATT&CK STIX → Neo4j Import Script
 
 This guide provides a Cypher script to import MITRE ATT&CK data (Enterprise, Mobile, and ICS STIX bundles) into a Neo4j database.  
 It loads the STIX objects as nodes and relationships, applies constraints for consistency, and builds helper links to make common queries easier and faster.
@@ -148,22 +148,6 @@ MATCH (:Attack {stix_type:'attack-pattern'})-[:IN_TACTIC]->(:Attack {stix_type:'
 RETURN count(*) AS technique_tactic_links;
 ```
 
-# MITRE ATT&CK Neo4j Import Script
-
-## 1️⃣ Create Constraints and Indexes (Idempotent)
-
-Ensure unique IDs for nodes and relationships and create indexes for faster lookups.
-
-```cypher
-CREATE CONSTRAINT attack_id IF NOT EXISTS
-FOR (n:Attack) REQUIRE n.id IS UNIQUE;
-
-CREATE CONSTRAINT attack_rel_id IF NOT EXISTS
-FOR ()-[r:ATTACK_REL]-() REQUIRE r.id IS UNIQUE;
-
--- Optional but useful for lookup by name
-CREATE INDEX attack_name IF NOT EXISTS FOR (n:Attack) ON (n.name);
-```
 
 ## **Level 1 - Easy (Query Warm-ups)**
 
